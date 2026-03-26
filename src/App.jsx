@@ -997,125 +997,78 @@ function HomeScreen({ user, history, onScan }) {
 }
 
 function ScannerScreen({ user, onResult }) {
-  const [cameraOn, setCameraOn] = useState(false);
   const [barcode, setBarcode] = useState("");
   const [loading, setLoading] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  const [scannerReady, setScannerReady] = useState(false);
+  const [scannerActive, setScannerActive] = useState(false);
   const [scanStatus, setScanStatus] = useState("");
   const [error, setError] = useState("");
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
-  const canvasRef = useRef(null);
-  const animFrameRef = useRef(null);
-  const zxingRef = useRef(null);
+  const scannerRef = useRef(null);
+  const html5QrRef = useRef(null);
+  const SCANNER_ID = "html5qr-scanner-region";
 
-  // Load ZXing dynamically
+  // Load html5-qrcode library
   useEffect(() => {
+    if (window.Html5Qrcode) { setScannerReady(true); return; }
     const script = document.createElement("script");
-    script.src = "https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js";
-    script.onload = () => { zxingRef.current = window.ZXing; };
+    script.src = "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js";
+    script.onload = () => setScannerReady(true);
+    script.onerror = () => setError("Failed to load scanner library. Use manual entry.");
     document.head.appendChild(script);
-    return () => { document.head.removeChild(script); };
   }, []);
 
-  const startCamera = async () => {
+  const startScanner = async () => {
+    if (!scannerReady || !window.Html5Qrcode) {
+      setError("Scanner not ready yet, please wait a moment.");
+      return;
+    }
     setError("");
+    setScanStatus("Starting camera...");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+      if (html5QrRef.current) {
+        try { await html5QrRef.current.stop(); } catch(e) {}
+        html5QrRef.current = null;
       }
-      setCameraOn(true);
-      setScanning(true);
-      setScanStatus("📷 Point camera at a barcode...");
+      const html5Qr = new window.Html5Qrcode(SCANNER_ID);
+      html5QrRef.current = html5Qr;
+
+      await html5Qr.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0 },
+        (decodedText) => {
+          setScanStatus("✅ Detected: " + decodedText);
+          stopScanner();
+          doFetch(decodedText);
+        },
+        (err) => {
+          // scan failure per frame — ignore
+        }
+      );
+      setScannerActive(true);
+      setScanStatus("📷 Point at a barcode...");
     } catch (e) {
-      setError("Camera access denied. Please allow camera or use manual entry.");
+      setError("Camera error: " + (e.message || e) + ". Try manual entry.");
+      setScanStatus("");
     }
   };
 
-  const stopCamera = () => {
-    setScanning(false);
+  const stopScanner = async () => {
+    setScannerActive(false);
     setScanStatus("");
-    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
-    if (videoRef.current) videoRef.current.srcObject = null;
-    setCameraOn(false);
+    if (html5QrRef.current) {
+      try { await html5QrRef.current.stop(); } catch(e) {}
+      try { html5QrRef.current.clear(); } catch(e) {}
+      html5QrRef.current = null;
+    }
   };
 
-  // Continuously grab frames and decode with ZXing
-  useEffect(() => {
-    if (!scanning || !cameraOn) return;
-
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-
-    const decode = async () => {
-      if (!scanning || !video || video.readyState < 2) {
-        animFrameRef.current = requestAnimationFrame(decode);
-        return;
-      }
-      try {
-        const ctx = canvas.getContext("2d");
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-        if (zxingRef.current) {
-          const ZXing = zxingRef.current;
-          const hints = new Map();
-          hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-            ZXing.BarcodeFormat.EAN_13,
-            ZXing.BarcodeFormat.EAN_8,
-            ZXing.BarcodeFormat.UPC_A,
-            ZXing.BarcodeFormat.UPC_E,
-            ZXing.BarcodeFormat.CODE_128,
-            ZXing.BarcodeFormat.CODE_39,
-            ZXing.BarcodeFormat.QR_CODE,
-          ]);
-          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-
-          const reader = new ZXing.MultiFormatReader();
-          reader.setHints(hints);
-
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const luminance = new ZXing.RGBLuminanceSource(imageData.data, canvas.width, canvas.height);
-          const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminance));
-
-          try {
-            const result = reader.decode(bitmap);
-            if (result) {
-              const code = result.getText();
-              setScanStatus("✅ Barcode detected: " + code);
-              setScanning(false);
-              stopCamera();
-              doFetch(code);
-              return;
-            }
-          } catch(e) {
-            // No barcode in this frame — keep trying
-          }
-        }
-      } catch(e) { /* canvas error, keep going */ }
-
-      animFrameRef.current = requestAnimationFrame(decode);
-    };
-
-    animFrameRef.current = requestAnimationFrame(decode);
-    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [scanning, cameraOn]);
-
-  useEffect(() => () => stopCamera(), []);
+  useEffect(() => () => { stopScanner(); }, []);
 
   const doFetch = async (code) => {
     const bc = (code || barcode).trim();
     if (!bc) { setError("Enter a barcode number"); return; }
     setError("");
     setLoading(true);
-    setScanStatus("🔍 Fetching product data...");
     try {
       const product = await fetchFoodData(bc);
       const pd = {
@@ -1134,56 +1087,64 @@ function ScannerScreen({ user, onResult }) {
         image: product.image_front_small_url || product.image_url || null,
         barcode: bc
       };
-      setScanStatus("");
       onResult(pd, user);
     } catch (e) {
       setError(e.message || "Could not fetch product");
-      setScanStatus("");
     }
     setLoading(false);
   };
 
   return (
     <div className="scanner-screen">
-      {error && <div style={{ background:"var(--red-dim)", border:"1px solid var(--red)", borderRadius:"var(--radius-sm)", padding:"10px 14px", fontSize:".82rem", color:"var(--red)" }}>⚠️ {error}</div>}
-
-      <div className="scanner-card">
-        <div className="camera-container" style={{ display:"flex", position:"relative" }}>
-          {cameraOn ? (<>
-            <video ref={videoRef} autoPlay playsInline muted style={{ width:"100%", height:"100%", objectFit:"cover" }} />
-            <canvas ref={canvasRef} style={{ display:"none" }} />
-            <div className="scan-overlay">
-              <div className="scan-frame">
-                <div className="scan-frame-b"></div>
-                <div className="scan-line"></div>
-              </div>
-            </div>
-            {scanStatus && (
-              <div style={{ position:"absolute", bottom:12, left:0, right:0, textAlign:"center", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:".8rem", padding:"6px 12px" }}>
-                {scanStatus}
-              </div>
-            )}
-          </>) : (
-            <div className="camera-off" style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", width:"100%", height:"100%", gap:12 }}>
-              <div className="camera-icon">📷</div>
-              <span style={{ fontSize:".85rem", color:"var(--text2)" }}>Tap Start Camera to scan</span>
-            </div>
-          )}
+      {error && (
+        <div style={{ background:"var(--red-dim)", border:"1px solid var(--red)", borderRadius:"var(--radius-sm)", padding:"10px 14px", fontSize:".82rem", color:"var(--red)" }}>
+          ⚠️ {error}
         </div>
+      )}
+
+      {/* Scanner container — html5-qrcode renders INTO this div */}
+      <div className="scanner-card">
+        <div
+          id={SCANNER_ID}
+          ref={scannerRef}
+          style={{
+            width: "100%",
+            minHeight: scannerActive ? "300px" : "0px",
+            background: "#000",
+            borderRadius: "var(--radius) var(--radius) 0 0",
+            overflow: "hidden",
+          }}
+        />
+        {!scannerActive && (
+          <div style={{
+            display:"flex", flexDirection:"column", alignItems:"center",
+            justifyContent:"center", padding:"40px 20px", gap:12, background:"#000",
+            borderRadius:"var(--radius) var(--radius) 0 0"
+          }}>
+            <div style={{ fontSize:"3.5rem" }}>📷</div>
+            <div style={{ color:"var(--text2)", fontSize:".9rem" }}>
+              {scannerReady ? "Camera ready" : "Loading scanner..."}
+            </div>
+          </div>
+        )}
+        {scanStatus && (
+          <div style={{ background:"rgba(109,222,94,0.15)", borderTop:"1px solid rgba(109,222,94,0.2)", padding:"8px 16px", fontSize:".82rem", color:"var(--green)", textAlign:"center" }}>
+            {scanStatus}
+          </div>
+        )}
         <div className="scanner-controls">
-          {!cameraOn
-            ? <button className="btn-primary" onClick={startCamera} style={{ flex:1 }} disabled={loading}>
-                {loading ? "Fetching product..." : "📷 Start Camera Scanner"}
+          {!scannerActive
+            ? <button className="btn-primary" onClick={startScanner} style={{ flex:1 }} disabled={loading || !scannerReady}>
+                {!scannerReady ? "⏳ Loading..." : loading ? "Fetching product..." : "📷 Start Camera Scanner"}
               </button>
-            : <button className="btn-ghost" onClick={stopCamera} style={{ flex:1 }}>⏹ Stop Camera</button>
+            : <button className="btn-ghost" onClick={stopScanner} style={{ flex:1 }}>⏹ Stop Scanner</button>
           }
         </div>
       </div>
 
-      {/* Tip card */}
-      <div style={{ background:"var(--card)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"12px 16px", fontSize:".8rem", color:"var(--text2)", lineHeight:1.6 }}>
-        <strong style={{ color:"var(--text)", display:"block", marginBottom:4 }}>📌 Scanning Tips</strong>
-        Hold the barcode <strong>steady</strong> inside the frame · Ensure <strong>good lighting</strong> · Keep the barcode <strong>flat and uncrumpled</strong> · Move <strong>closer or further</strong> until it locks
+      <div style={{ background:"var(--card)", border:"1px solid var(--border)", borderRadius:"var(--radius)", padding:"12px 16px", fontSize:".8rem", color:"var(--text2)", lineHeight:1.7 }}>
+        <strong style={{ color:"var(--text)", display:"block", marginBottom:4 }}>📌 Tips for best results</strong>
+        Hold barcode <strong>steady</strong> in the box · Good <strong>lighting</strong> is key · Keep label <strong>flat</strong> · Move <strong>closer or farther</strong> until it locks
       </div>
 
       <div className="manual-input-section">
