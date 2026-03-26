@@ -803,30 +803,280 @@ async function fetchFoodData(barcode) {
 }
 
 async function analyzeWithAI(productData, userProfile) {
-  const prompt = `You are a clinical nutritionist AI. Analyze this food product for a specific user.
+  // ── 1. Parse all nutrition values ──────────────────────────────────────
+  const sugar    = parseFloat(productData.sugar)    || 0;
+  const salt     = parseFloat(productData.salt)     || 0;
+  const satFat   = parseFloat(productData.saturatedFat) || 0;
+  const fat      = parseFloat(productData.fat)      || 0;
+  const calories = parseFloat(productData.calories) || 0;
+  const fiber    = parseFloat(productData.fiber)    || 0;
+  const protein  = parseFloat(productData.protein)  || 0;
 
-USER HEALTH PROFILE:
-- Age: ${userProfile.age || "Not specified"}
-- Weight: ${userProfile.weight || "Not specified"} kg
-- Allergies: ${userProfile.allergies || "None"}
-- Health Conditions: ${userProfile.conditions || "None"}
-- Diet Type: ${userProfile.diet || "Not specified"}
+  // ── 2. Normalize strings for matching ─────────────────────────────────
+  const ingredientsRaw  = (productData.ingredients || "").toLowerCase();
+  const conditionsRaw   = (userProfile.conditions  || "").toLowerCase();
+  const allergiesRaw    = (userProfile.allergies   || "").toLowerCase();
+  const dietRaw         = (userProfile.diet        || "").toLowerCase();
 
-PRODUCT DATA:
-- Name: ${productData.name}
-- Ingredients: ${productData.ingredients?.substring(0, 600) || "Not available"}
-- Nutrition per 100g: Calories: ${productData.calories}, Protein: ${productData.protein}g, Fat: ${productData.fat}g, Sugar: ${productData.sugar}g, Salt: ${productData.salt}g
-- Nutri-Score: ${productData.nutriScore || "N/A"}
+  // ── 3. Detect health conditions ────────────────────────────────────────
+  const isDiabetic   = /diabet/.test(conditionsRaw);
+  const isType1      = /type\s*1/.test(conditionsRaw);
+  const isType2      = /type\s*2/.test(conditionsRaw);
+  const isHyper      = /hypertens|high\s*bp|high blood pressure/.test(conditionsRaw);
+  const isHeart      = /heart|cardiac|cholesterol|cardiovascular/.test(conditionsRaw);
+  const isKidney     = /kidney|renal/.test(conditionsRaw);
+  const isLiver      = /liver|hepat/.test(conditionsRaw);
+  const isObese      = /obes|overweight/.test(conditionsRaw);
+  const isThyroid    = /thyroid/.test(conditionsRaw);
+  const isAnemia     = /anemi|anaemi/.test(conditionsRaw);
+  const isLactose    = /lactose/.test(conditionsRaw);
+  const isCeliac     = /celiac|coeliac/.test(conditionsRaw);
+  const isGerd       = /gerd|acid reflux|gastro/.test(conditionsRaw);
+  const isIBS        = /ibs|irritable bowel/.test(conditionsRaw);
+  const isPCOS       = /pcos|polycystic/.test(conditionsRaw);
 
-Return ONLY a valid JSON object (no markdown, no explanation, no backticks) in this exact format:
+  // ── 4. Detect diet type ────────────────────────────────────────────────
+  const isVegan      = /vegan/.test(dietRaw);
+  const isVeg        = /vegetarian/.test(dietRaw);
+  const isKeto       = /keto/.test(dietRaw);
+  const isGlutenFree = /gluten/.test(dietRaw);
+  const isHalal      = /halal/.test(dietRaw);
+  const isKosher     = /kosher/.test(dietRaw);
+  const isPaleo      = /paleo/.test(dietRaw);
+
+  // ── 5. ALLERGEN DETECTION — comprehensive ingredient scanning ──────────
+  // Master allergen map: keyword → common names that may appear in ingredients
+  const ALLERGEN_MAP = {
+    "nuts":          ["nut","almond","cashew","pistachio","walnut","pecan","hazelnut","macadamia","brazil nut","pine nut","peanut","groundnut","praline","marzipan","frangipane","nougat"],
+    "peanut":        ["peanut","groundnut","arachis","monkey nut"],
+    "tree nuts":     ["almond","cashew","pistachio","walnut","pecan","hazelnut","macadamia","brazil nut","pine nut","praline","marzipan"],
+    "gluten":        ["wheat","gluten","barley","rye","malt","spelt","semolina","triticale","kamut","farro","bulgur","durum","oat"],
+    "wheat":         ["wheat","semolina","durum","spelt","farro","bulgur","triticale"],
+    "dairy":         ["milk","cream","butter","cheese","whey","casein","lactose","ghee","yogurt","curd","paneer","lactalbumin","lactoglobulin"],
+    "milk":          ["milk","cream","butter","cheese","whey","casein","lactose","ghee","yogurt","curd","paneer"],
+    "eggs":          ["egg","albumin","globulin","lecithin (egg","ovalbumin","ovomucin","lysozyme"],
+    "egg":           ["egg","albumin","ovalbumin","ovomucin","lysozyme"],
+    "soy":           ["soy","soya","tofu","tempeh","edamame","miso","natto","tamari","textured vegetable protein","tvp"],
+    "fish":          ["fish","cod","salmon","tuna","sardine","anchov","mackerel","tilapia","bass","trout","herring","halibut"],
+    "shellfish":     ["shrimp","prawn","crab","lobster","crayfish","langoustine","scallop","clam","mussel","oyster","squid","octopus"],
+    "sesame":        ["sesame","tahini","til","gingelly"],
+    "mustard":       ["mustard","sinapis"],
+    "celery":        ["celery","celeriac"],
+    "lupin":         ["lupin","lupine"],
+    "molluscs":      ["squid","octopus","snail","clam","mussel","oyster","scallop","abalone"],
+    "sulphites":     ["sulphite","sulfite","sulphur dioxide","so2","e220","e221","e222","e223","e224","e225","e226","e227","e228"],
+  };
+
+  // Parse user's allergy list — handle comma/semicolon/space separation
+  const userAllergyList = allergiesRaw
+    .split(/[,;\/]+/)
+    .map(a => a.trim().toLowerCase())
+    .filter(a => a.length > 1);
+
+  // For each user allergy, check all known aliases against ingredients
+  const allergenHits = [];
+  for (const allergy of userAllergyList) {
+    // Direct match first
+    if (ingredientsRaw.includes(allergy)) {
+      allergenHits.push({ allergy, found: allergy });
+      continue;
+    }
+    // Check via allergen map
+    const aliases = ALLERGEN_MAP[allergy] || [];
+    for (const alias of aliases) {
+      if (ingredientsRaw.includes(alias)) {
+        allergenHits.push({ allergy, found: alias });
+        break;
+      }
+    }
+    // Also check if the allergy word itself is a partial match in any map value
+    for (const [key, aliases2] of Object.entries(ALLERGEN_MAP)) {
+      if (key.includes(allergy) || allergy.includes(key)) {
+        for (const alias of aliases2) {
+          if (ingredientsRaw.includes(alias)) {
+            if (!allergenHits.find(h => h.allergy === allergy)) {
+              allergenHits.push({ allergy, found: alias });
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  const allergenAlert   = allergenHits.length > 0;
+  const allergenDetail  = allergenAlert
+    ? allergenHits.map(h => `"${h.found}" (you are allergic to ${h.allergy})`).join("; ")
+    : null;
+
+  // ── 6. DIET VIOLATIONS ─────────────────────────────────────────────────
+  const ANIMAL = ["milk","cream","butter","cheese","egg","meat","beef","pork","lamb","chicken","turkey","fish","gelatin","lard","whey","casein","honey","anchovies","rennet"];
+  const MEAT   = ["beef","pork","lamb","chicken","turkey","fish","meat","lard","anchovies","gelatin"];
+  const GLUTEN_ING = ["wheat","gluten","barley","rye","malt","spelt","semolina"];
+  const HALAL_BAN  = ["pork","lard","gelatin","alcohol","wine","beer","ethanol","rum","brandy","liqueur"];
+
+  const veganViolations   = isVegan      ? ANIMAL.filter(a => ingredientsRaw.includes(a))     : [];
+  const vegViolations     = isVeg        ? MEAT.filter(a => ingredientsRaw.includes(a))        : [];
+  const glutenViolations  = (isGlutenFree || isCeliac) ? GLUTEN_ING.filter(g => ingredientsRaw.includes(g)) : [];
+  const halalViolations   = isHalal      ? HALAL_BAN.filter(h => ingredientsRaw.includes(h))  : [];
+
+  // ── 7. NUTRITION FLAGS ─────────────────────────────────────────────────
+  const SUGAR_HIGH  = sugar    > 10;
+  const SUGAR_VHIGH = sugar    > 22.5;
+  const SALT_HIGH   = salt     > 1.5;
+  const SALT_VHIGH  = salt     > 2.5;
+  const SATFAT_HIGH = satFat   > 5;
+  const CAL_HIGH    = calories > 400;
+  const FIBER_GOOD  = fiber    > 3;
+  const PROTEIN_GOOD= protein  > 10;
+
+  // ── 8. BUILD ISSUE LIST (shown to AI and used for verdict override) ────
+  const issues   = [];
+  const benefits = [];
+  const cautions = [];
+
+  // Allergens — HIGHEST PRIORITY
+  if (allergenAlert) {
+    issues.push(`🚨 ALLERGEN DETECTED: ${allergenDetail}. This product MUST be avoided.`);
+  }
+
+  // Diet violations
+  if (veganViolations.length)  issues.push(`❌ NOT VEGAN: Contains ${[...new Set(veganViolations)].join(", ")}`);
+  if (vegViolations.length)    issues.push(`❌ NOT VEGETARIAN: Contains ${[...new Set(vegViolations)].join(", ")}`);
+  if (glutenViolations.length) issues.push(`❌ CONTAINS GLUTEN: Found ${[...new Set(glutenViolations)].join(", ")} — unsafe for ${isCeliac ? "celiac disease" : "gluten-free diet"}`);
+  if (halalViolations.length)  issues.push(`❌ NOT HALAL: Contains ${[...new Set(halalViolations)].join(", ")}`);
+
+  // Diabetes
+  if (isDiabetic || isType1 || isType2) {
+    const dtype = isType1 ? "Type 1 Diabetes" : isType2 ? "Type 2 Diabetes" : "Diabetes";
+    if (SUGAR_VHIGH) issues.push(`❌ CRITICAL SUGAR: ${sugar}g/100g is dangerously high for ${dtype}. Will spike blood glucose severely.`);
+    else if (SUGAR_HIGH) issues.push(`⚠️ HIGH SUGAR: ${sugar}g/100g is too high for ${dtype}. Significant glucose spike risk.`);
+    else { benefits.push(`Sugar level (${sugar}g/100g) is relatively acceptable for ${dtype} — monitor portion size`); }
+    if (FIBER_GOOD) benefits.push(`Fiber (${fiber}g/100g) helps slow glucose absorption — beneficial for diabetics`);
+  }
+
+  // Hypertension
+  if (isHyper) {
+    if (SALT_VHIGH) issues.push(`❌ DANGEROUS SODIUM: ${salt}g salt/100g is very high — severely raises blood pressure`);
+    else if (SALT_HIGH) issues.push(`⚠️ HIGH SODIUM: ${salt}g salt/100g is elevated — increases blood pressure risk`);
+    else cautions.push(`Salt is ${salt}g/100g — acceptable but watch total daily sodium intake`);
+  }
+
+  // Heart disease / cholesterol
+  if (isHeart) {
+    if (SATFAT_HIGH) issues.push(`❌ HIGH SATURATED FAT: ${satFat}g/100g raises LDL cholesterol — dangerous for heart disease`);
+    else benefits.push(`Saturated fat (${satFat}g/100g) is within acceptable range for heart patients`);
+  }
+
+  // Kidney
+  if (isKidney) {
+    if (SALT_HIGH)    issues.push(`❌ HIGH SODIUM: ${salt}g/100g puts extra strain on kidneys`);
+    if (PROTEIN_GOOD) issues.push(`⚠️ HIGH PROTEIN: ${protein}g/100g may increase kidney workload — limit intake`);
+  }
+
+  // Obesity / Keto
+  if (isObese) {
+    if (CAL_HIGH) issues.push(`⚠️ HIGH CALORIE: ${calories}kcal/100g — not ideal for weight management`);
+    if (SUGAR_HIGH) issues.push(`⚠️ HIGH SUGAR: ${sugar}g/100g contributes to weight gain`);
+  }
+  if (isKeto) {
+    if (sugar > 5)  issues.push(`❌ KETO VIOLATION: ${sugar}g sugar/100g exceeds keto limit (~5g) — will break ketosis`);
+    if (sugar <= 5) benefits.push(`Sugar (${sugar}g/100g) is within keto-friendly range`);
+  }
+
+  // Lactose intolerance
+  if (isLactose) {
+    const dairyFound = ["milk","lactose","whey","cream","butter","cheese","casein"].filter(d => ingredientsRaw.includes(d));
+    if (dairyFound.length) issues.push(`❌ LACTOSE: Contains ${[...new Set(dairyFound)].join(", ")} — will cause digestive issues`);
+  }
+
+  // GERD / Acid Reflux
+  if (isGerd) {
+    const gerdTriggers = ["chocolate","coffee","mint","peppermint","tomato","citric acid","vinegar","onion","garlic","chili","pepper"];
+    const gerdFound = gerdTriggers.filter(g => ingredientsRaw.includes(g));
+    if (gerdFound.length) issues.push(`⚠️ GERD TRIGGER: Contains ${gerdFound.join(", ")} — may worsen acid reflux`);
+  }
+
+  // PCOS
+  if (isPCOS) {
+    if (SUGAR_HIGH) issues.push(`⚠️ HIGH SUGAR: ${sugar}g/100g worsens insulin resistance — not ideal for PCOS`);
+    if (FIBER_GOOD) benefits.push(`Fiber (${fiber}g/100g) supports hormonal balance beneficial for PCOS`);
+  }
+
+  // Liver
+  if (isLiver) {
+    if (SATFAT_HIGH) issues.push(`⚠️ HIGH FAT: ${satFat}g saturated fat/100g may stress the liver`);
+    if (CAL_HIGH)    issues.push(`⚠️ HIGH CALORIE: ${calories}kcal/100g may contribute to fatty liver`);
+  }
+
+  // General benefits
+  if (PROTEIN_GOOD && !isKidney) benefits.push(`Good protein source (${protein}g/100g) — supports muscle maintenance`);
+  if (FIBER_GOOD && !isDiabetic) benefits.push(`High fiber (${fiber}g/100g) — supports digestive health`);
+
+  // ── 9. DETERMINE VERDICT ───────────────────────────────────────────────
+  const mustAvoid =
+    allergenAlert ||
+    veganViolations.length > 0 ||
+    vegViolations.length > 0 ||
+    glutenViolations.length > 0 ||
+    halalViolations.length > 0 ||
+    (isLactose && ["milk","lactose","whey","cream","butter","casein"].some(d => ingredientsRaw.includes(d))) ||
+    ((isDiabetic || isType1 || isType2) && SUGAR_VHIGH) ||
+    (isHyper && SALT_VHIGH) ||
+    (isKeto && sugar > 15);
+
+  const shouldCaution =
+    ((isDiabetic || isType1 || isType2) && SUGAR_HIGH) ||
+    (isHyper && SALT_HIGH) ||
+    (isHeart && SATFAT_HIGH) ||
+    (isKidney && (SALT_HIGH || PROTEIN_GOOD)) ||
+    (isObese && CAL_HIGH) ||
+    (isKeto && sugar > 5) ||
+    (isPCOS && SUGAR_HIGH) ||
+    (isGerd && ingredientsRaw.match(/chocolate|coffee|mint|tomato/));
+
+  const forcedVerdict = mustAvoid ? "avoid" : shouldCaution ? "caution" : null;
+
+  // ── 10. BUILD PROMPT ───────────────────────────────────────────────────
+  const prompt = `You are a clinical nutritionist AI. Give a PERSONALIZED food analysis for this specific user. Base your response entirely on the PRE-ANALYSIS below — do not ignore it.
+
+USER: ${userProfile.name || "User"}, Age ${userProfile.age || "?"}, Weight ${userProfile.weight || "?"}kg
+Conditions: ${userProfile.conditions || "None"}
+Allergies: ${userProfile.allergies || "None"}
+Diet: ${userProfile.diet || "No specific diet"}
+
+PRODUCT: ${productData.name} | Nutri-Score: ${productData.nutriScore || "N/A"}
+Nutrition/100g → Cal:${calories} | Protein:${protein}g | Fat:${fat}g | SatFat:${satFat}g | Sugar:${sugar}g | Salt:${salt}g | Fiber:${fiber}g
+Ingredients: ${productData.ingredients?.substring(0, 500) || "N/A"}
+
+=== PRE-ANALYSIS (YOU MUST FOLLOW THIS) ===
+ISSUES FOUND:
+${issues.length ? issues.join("
+") : "No critical issues found for this user."}
+
+BENEFITS FOUND:
+${benefits.length ? benefits.join("
+") : "No specific benefits identified."}
+
+FORCED VERDICT: ${forcedVerdict ? forcedVerdict.toUpperCase() + " (non-negotiable)" : "Assess based on overall nutrition"}
+
+=== INSTRUCTIONS ===
+- Write benefits, cautions, avoidReasons that MENTION the user's specific condition/allergy by name
+- If allergen detected: avoidReasons MUST say which ingredient matches which allergy
+- If diabetic + high sugar: say exact sugar amount and why it affects that type of diabetes
+- DO NOT say "Low in added sugars" if sugar > 10g
+- DO NOT say "Good For You" if there are critical issues above
+- Keep each point under 20 words but make it specific
+
+Return ONLY this JSON (no markdown, no extra text):
 {
-  "verdict": "good" or "caution" or "avoid",
-  "verdictReason": "one line summary",
-  "benefits": ["benefit 1", "benefit 2"],
-  "cautions": ["caution 1"],
-  "avoidReasons": ["reason 1"],
-  "allergenAlert": true or false,
-  "allergenDetail": "detail or null"
+  "verdict": "${forcedVerdict || "good"}",
+  "verdictReason": "one line mentioning user condition and key issue",
+  "benefits": ["specific benefit for this user"],
+  "cautions": ["specific caution with number e.g. 55g sugar"],
+  "avoidReasons": ${mustAvoid ? '["specific reason mentioning allergy/condition"]' : '[]'},
+  "allergenAlert": ${allergenAlert},
+  "allergenDetail": ${allergenAlert ? `"${allergenDetail}"` : "null"}
 }`;
 
   const res = await fetch("/api/analyze", {
@@ -835,12 +1085,52 @@ Return ONLY a valid JSON object (no markdown, no explanation, no backticks) in t
     body: JSON.stringify({ prompt }),
   });
 
-  if (!res.ok) throw new Error("AI analysis failed");
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || "AI analysis failed");
+  }
   const data = await res.json();
-  const clean = data.text.replace(/```json|```/g, "").trim();
-  return JSON.parse(clean);
-}
+  if (data.error) throw new Error(data.error);
 
+  let clean = data.text.replace(/```json|```/g, "").trim();
+  const jsonMatch = clean.match(/\{[\s\S]*\}/);
+  if (jsonMatch) clean = jsonMatch[0];
+
+  const result = JSON.parse(clean);
+
+  // ── 11. HARD OVERRIDE — JS always wins over AI ─────────────────────────
+  if (mustAvoid)                                result.verdict = "avoid";
+  else if (shouldCaution && result.verdict === "good") result.verdict = "caution";
+
+  if (allergenAlert) {
+    result.allergenAlert  = true;
+    result.allergenDetail = allergenDetail;
+    result.verdict        = "avoid";
+    // Ensure avoidReasons includes the allergen
+    const allergenMsg = `Contains ${allergenHits.map(h => h.found).join(", ")} — you are allergic to ${allergenHits.map(h => h.allergy).join(", ")}`;
+    if (!result.avoidReasons) result.avoidReasons = [];
+    if (!result.avoidReasons.some(r => r.toLowerCase().includes("allergen") || r.toLowerCase().includes("allerg"))) {
+      result.avoidReasons.unshift(allergenMsg);
+    }
+    // Remove any false benefits about the allergen ingredient
+    result.benefits = (result.benefits || []).filter(b =>
+      !allergenHits.some(h => b.toLowerCase().includes(h.found))
+    );
+  }
+
+  // Remove false "low sugar" claims when sugar is actually high
+  if (SUGAR_HIGH) {
+    result.benefits = (result.benefits || []).filter(b =>
+      !/low.{0,10}sugar|low.{0,10}carb/i.test(b)
+    );
+    result.cautions = result.cautions || [];
+    if (!result.cautions.some(c => c.includes("sugar") || c.includes("Sugar"))) {
+      result.cautions.push(`Contains ${sugar}g sugar per 100g — ${isDiabetic ? "dangerous for diabetes" : "high amount"}`);
+    }
+  }
+
+  return result;
+}
 
 // ─── Components ────────────────────────────────────────────────────────────
 
