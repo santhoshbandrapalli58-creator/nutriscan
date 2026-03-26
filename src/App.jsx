@@ -1051,12 +1051,10 @@ Ingredients: ${productData.ingredients?.substring(0, 500) || "N/A"}
 
 === PRE-ANALYSIS (YOU MUST FOLLOW THIS) ===
 ISSUES FOUND:
-${issues.length ? issues.join("
-") : "No critical issues found for this user."}
+${issues.length ? issues.join(" | ") : "No critical issues found for this user."}
 
 BENEFITS FOUND:
-${benefits.length ? benefits.join("
-") : "No specific benefits identified."}
+${benefits.length ? benefits.join(" | ") : "No specific benefits identified."}
 
 FORCED VERDICT: ${forcedVerdict ? forcedVerdict.toUpperCase() + " (non-negotiable)" : "Assess based on overall nutrition"}
 
